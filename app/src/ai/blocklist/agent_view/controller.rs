@@ -817,6 +817,26 @@ impl AgentViewController {
             });
         }
 
+        // Register this view as a consumer of orchestration events for the
+        // conversation. The streamer only opens an SSE if the conversation is
+        // a parent (has children registered) — registering early ensures we
+        // pick up SSE as soon as the first child is spawned.
+        if warp_core::features::FeatureFlag::OrchestrationV2.is_enabled() {
+            let view_id = self.terminal_view_id;
+            crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::handle(
+                ctx,
+            )
+            .update(ctx, |streamer, ctx| {
+                streamer.register_consumer(
+                    conversation_id,
+                    crate::ai::blocklist::orchestration_event_streamer::ConsumerId::AgentView(
+                        view_id,
+                    ),
+                    ctx,
+                );
+            });
+        }
+
         ctx.emit(AgentViewControllerEvent::EnteredAgentView {
             conversation_id,
             is_new: exchange_count == 0,
@@ -958,6 +978,24 @@ impl AgentViewController {
             .conversation(&conversation_id)
             .map(|conversation| conversation.exchange_count())
             .unwrap_or(0);
+
+        // Mirror the EnteredAgentView consumer registration: tear down the
+        // SSE-keeping role this view was satisfying for the conversation.
+        if warp_core::features::FeatureFlag::OrchestrationV2.is_enabled() {
+            let view_id = self.terminal_view_id;
+            crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::handle(
+                ctx,
+            )
+            .update(ctx, |streamer, ctx| {
+                streamer.unregister_consumer(
+                    conversation_id,
+                    crate::ai::blocklist::orchestration_event_streamer::ConsumerId::AgentView(
+                        view_id,
+                    ),
+                    ctx,
+                );
+            });
+        }
 
         ctx.emit(AgentViewControllerEvent::ExitedAgentView {
             conversation_id,

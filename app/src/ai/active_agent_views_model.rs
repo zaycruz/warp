@@ -198,6 +198,24 @@ impl ActiveAgentViewsModel {
             }
 
             if let Some(conversation_id) = closed_conversation_id {
+                // Mirror enter_agent_view_internal's consumer registration:
+                // the pane-close path does not run exit_agent_view_internal,
+                // so we have to unregister here ourselves.
+                if warp_core::features::FeatureFlag::OrchestrationV2.is_enabled() {
+                    crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::handle(
+                        ctx,
+                    )
+                    .update(ctx, |streamer, ctx| {
+                        streamer.unregister_consumer(
+                            conversation_id,
+                            crate::ai::blocklist::orchestration_event_streamer::ConsumerId::AgentView(
+                                terminal_pane_id,
+                            ),
+                            ctx,
+                        );
+                    });
+                }
+
                 ctx.emit(ActiveAgentViewsEvent::ConversationClosed { conversation_id });
             }
         }
