@@ -157,6 +157,9 @@ impl ActiveAgentViewsModel {
                         focused_terminal_state.active_conversation_id = Some(conv_id);
                     }
                 }
+                // Bridge the controller's lifecycle into the streamer's
+                // per-conversation consumer registry.
+                register_agent_view_consumer(*conversation_id, terminal_view_id, ctx);
                 // Emit so subscribers can move this conversation to the Active section.
                 ctx.emit(ActiveAgentViewsEvent::TerminalViewFocused);
             }
@@ -178,6 +181,7 @@ impl ActiveAgentViewsModel {
                         state.active_conversation_id = None;
                     }
                 }
+                unregister_agent_view_consumer(*conversation_id, terminal_view_id, ctx);
                 // Emit so subscribers can move this conversation to the Past section.
                 ctx.emit(ActiveAgentViewsEvent::ConversationClosed {
                     conversation_id: *conversation_id,

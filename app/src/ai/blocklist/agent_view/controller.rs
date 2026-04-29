@@ -14,12 +14,7 @@ use crate::terminal::input::message_bar::{Message, MessageItem};
 use crate::terminal::input::slash_commands::SlashCommandTrigger;
 use crate::util::bindings::keybinding_name_to_keystroke;
 use crate::{
-    ai::{
-        agent::conversation::AIConversationId,
-        blocklist::orchestration_event_streamer::{
-            register_agent_view_consumer, unregister_agent_view_consumer,
-        },
-    },
+    ai::agent::conversation::AIConversationId,
     terminal::{view::ambient_agent::AmbientAgentViewModel, TerminalModel},
     BlocklistAIHistoryModel,
 };
@@ -822,11 +817,9 @@ impl AgentViewController {
             });
         }
 
-        // Register early; the streamer opens an SSE once the conversation
-        // is a child (server token assigned) or a parent (a child run_id
-        // is registered).
-        register_agent_view_consumer(conversation_id, self.terminal_view_id, ctx);
-
+        // Streamer-consumer registration is handled by
+        // `ActiveAgentViewsModel` in response to the
+        // `EnteredAgentView` event below.
         ctx.emit(AgentViewControllerEvent::EnteredAgentView {
             conversation_id,
             is_new: exchange_count == 0,
@@ -969,9 +962,9 @@ impl AgentViewController {
             .map(|conversation| conversation.exchange_count())
             .unwrap_or(0);
 
-        // Mirror the EnteredAgentView registration above.
-        unregister_agent_view_consumer(conversation_id, self.terminal_view_id, ctx);
-
+        // Streamer-consumer unregistration is handled by
+        // `ActiveAgentViewsModel` in response to the `ExitedAgentView`
+        // event below.
         ctx.emit(AgentViewControllerEvent::ExitedAgentView {
             conversation_id,
             origin,
