@@ -63,6 +63,12 @@ pub enum MonolithCockpitAction {
     OpenCommand {
         command: String,
     },
+    OpenSshWorkbench {
+        command: String,
+    },
+    RunTerminalCommand {
+        command: String,
+    },
     StartTenantChat {
         tenant_name: String,
         prompt: String,
@@ -185,13 +191,10 @@ impl MonolithCockpitView {
         )
     }
 
-    fn remote_interactive_shell_command(host: &HostProfile, workdir: &str) -> String {
-        Self::remote_command(
-            host,
-            &format!(
-                "cd {} && printf '\\nMonolith VM workbench: %s\\n' \"$PWD\" && exec ${{SHELL:-bash}} -l",
-                Self::shell_escape(workdir)
-            ),
+    fn remote_runtime_cd_command(workdir: &str) -> String {
+        format!(
+            "cd {} && printf '\\nMonolith runtime: %s\\n' \"$PWD\"",
+            Self::shell_escape(workdir)
         )
     }
 
@@ -223,7 +226,8 @@ Runtime status: {}\n\
 Workdir: {}\n\
 Git ref: {}\n\
 Service: {}\n\n\
-Start by opening an SSH workbench if it is not already open:\n{}\n\n\
+Start by opening an SSH workbench if it is not already open:\n{}\n\
+Then switch the active remote session to the runtime directory:\n{}\n\n\
 Work only in the runtime workdir unless I explicitly widen scope. First inspect files, git status, service status, and recent logs. Do not deploy, restart, start, pause, or mutate production without showing the exact command and getting explicit confirmation.",
             tenant.name,
             tenant.environment,
@@ -235,7 +239,8 @@ Work only in the runtime workdir unless I explicitly widen scope. First inspect 
             runtime.workdir,
             runtime.git_ref,
             service_name,
-            Self::remote_interactive_shell_command(host, &runtime.workdir)
+            Self::gcloud_ssh_prefix(host),
+            Self::remote_runtime_cd_command(&runtime.workdir)
         )
     }
 
@@ -503,6 +508,34 @@ VMs and runtimes:\n{}",
                 });
             })
             .finish()
+    }
+
+    fn ssh_workbench_button(
+        label: &str,
+        command: String,
+        mouse_state: MouseStateHandle,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        Self::typed_button(
+            label,
+            MonolithCockpitAction::OpenSshWorkbench { command },
+            mouse_state,
+            app,
+        )
+    }
+
+    fn terminal_command_button(
+        label: &str,
+        command: String,
+        mouse_state: MouseStateHandle,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        Self::typed_button(
+            label,
+            MonolithCockpitAction::RunTerminalCommand { command },
+            mouse_state,
+            app,
+        )
     }
 
     fn typed_button(
@@ -949,7 +982,8 @@ VMs and runtimes:\n{}",
             format!("printf '%s\\n' {}", Self::shell_escape(&message))
         };
 
-        let runtime_workbench = Self::remote_interactive_shell_command(host, &runtime.workdir);
+        let runtime_workbench = Self::gcloud_ssh_prefix(host);
+        let runtime_cd = Self::remote_runtime_cd_command(&runtime.workdir);
         let file_browse = Self::remote_file_browse_command(host, &runtime.workdir);
         let runtime_agent_prompt = Self::runtime_agent_prompt(tenant, host, runtime, &service_name);
         let git_status = Self::remote_command(
@@ -1068,9 +1102,15 @@ VMs and runtimes:\n{}",
                 .with_child(
                     Flex::row()
                         .with_spacing(6.)
-                        .with_child(Self::action_button(
-                            "workbench",
+                        .with_child(Self::ssh_workbench_button(
+                            "ssh",
                             runtime_workbench,
+                            Self::next_mouse_state(mouse_states, button_index),
+                            app,
+                        ))
+                        .with_child(Self::terminal_command_button(
+                            "cd",
+                            runtime_cd,
                             Self::next_mouse_state(mouse_states, button_index),
                             app,
                         ))
@@ -1190,7 +1230,7 @@ VMs and runtimes:\n{}",
                                 )
                                 .finish(),
                         )
-                        .with_child(Self::action_button(
+                        .with_child(Self::ssh_workbench_button(
                             "ssh",
                             ssh_command,
                             Self::next_mouse_state(mouse_states, button_index),
@@ -1376,6 +1416,19 @@ impl TypedActionView for MonolithCockpitView {
                     shell_type: ShellType::from_name("bash"),
                 },
             ),
+            MonolithCockpitAction::OpenSshWorkbench { command } => {
+                ctx.dispatch_global_action(
+                    OPEN_SUBSHELL_ACTION,
+                    SubshellCommandArg {
+                        command: command.clone(),
+                        shell_type: ShellType::from_name("bash"),
+                    },
+                );
+                ctx.dispatch_typed_action(&WorkspaceAction::RunCommand(command.clone()));
+            }
+            MonolithCockpitAction::RunTerminalCommand { command } => {
+                ctx.dispatch_typed_action(&WorkspaceAction::RunCommand(command.clone()));
+            }
             MonolithCockpitAction::StartTenantChat {
                 tenant_name,
                 prompt,
