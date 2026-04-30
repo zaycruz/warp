@@ -14814,12 +14814,17 @@ impl Workspace {
         replace_buffer: bool,
         should_submit: bool,
         ensure_agent_mode: bool,
+        ensure_terminal_mode: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         let active_input_handle = self.get_active_input_view_handle(ctx);
 
         if let Some(active_input_handle) = active_input_handle {
             active_input_handle.update(ctx, |input, ctx| {
+                if ensure_terminal_mode {
+                    input.set_input_mode_terminal(true, ctx);
+                }
+
                 if replace_buffer {
                     input.replace_buffer_content(content, ctx);
                 } else {
@@ -20881,7 +20886,7 @@ impl TypedActionView for Workspace {
             }
             RunCommand(code) => {
                 let command = code.trim().to_string();
-                self.insert_in_input(&command, true, true, false, ctx);
+                self.insert_in_input(&command, true, true, false, true, ctx);
                 ctx.notify();
             }
             InsertInInput {
@@ -20889,7 +20894,7 @@ impl TypedActionView for Workspace {
                 replace_buffer,
                 ensure_agent_mode,
             } => {
-                self.insert_in_input(content, *replace_buffer, false, *ensure_agent_mode, ctx);
+                self.insert_in_input(content, *replace_buffer, false, *ensure_agent_mode, false, ctx);
                 ctx.notify();
             }
             AttemptLoginGatedAIUpgrade => {
@@ -21609,7 +21614,7 @@ impl TypedActionView for Workspace {
 
                 // Prefill the input after the rewind
                 if let Some(query) = user_query {
-                    self.insert_in_input(&query, true, false, true, ctx);
+                    self.insert_in_input(&query, true, false, true, false, ctx);
                 }
             }
             ExecuteDeleteConversation {
