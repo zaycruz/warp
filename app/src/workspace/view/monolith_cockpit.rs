@@ -795,74 +795,64 @@ VMs and runtimes:\n{}",
                     .with_spacing(7.)
                     .with_child(Self::section_label("TENANT CONTEXT", app))
                     .with_child(
+                        Flex::column()
+                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                            .with_spacing(4.)
+                            .with_child(
+                                Text::new(tenant.name.clone(), appearance.ui_font_family(), 13.)
+                                    .with_color(theme.active_ui_text_color().into_solid())
+                                    .with_style(Properties::default().weight(Weight::Semibold))
+                                    .finish(),
+                            )
+                            .with_child(Self::muted_text(
+                                format!(
+                                    "{} · {} vms · {} / {} running",
+                                    tenant.environment,
+                                    tenant.hosts.len(),
+                                    Self::running_runtime_count(tenant),
+                                    Self::runtime_count(tenant)
+                                ),
+                                11.,
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(
                         Flex::row()
-                            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                            .with_child(
-                                Flex::column()
-                                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                                    .with_spacing(4.)
-                                    .with_child(
-                                        Text::new(
-                                            tenant.name.clone(),
-                                            appearance.ui_font_family(),
-                                            13.,
-                                        )
-                                        .with_color(theme.active_ui_text_color().into_solid())
-                                        .with_style(Properties::default().weight(Weight::Semibold))
-                                        .finish(),
-                                    )
-                                    .with_child(Self::muted_text(
-                                        format!(
-                                            "{} · {} vms · {} / {} running",
-                                            tenant.environment,
-                                            tenant.hosts.len(),
-                                            Self::running_runtime_count(tenant),
-                                            Self::runtime_count(tenant)
-                                        ),
-                                        11.,
-                                        app,
-                                    ))
-                                    .finish(),
-                            )
-                            .with_child(
-                                Flex::row()
-                                    .with_spacing(6.)
-                                    .with_child(Self::primary_typed_button(
-                                        "chat",
-                                        MonolithCockpitAction::StartTenantChat {
-                                            tenant_name: tenant.name.clone(),
-                                            prompt,
-                                        },
-                                        self.tenant_context_mouse_states
-                                            .first()
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        app,
-                                    ))
-                                    .with_child(Self::typed_button(
-                                        "copy",
-                                        MonolithCockpitAction::CopyTenantContext {
-                                            tenant_name: tenant.name.clone(),
-                                            context,
-                                        },
-                                        self.tenant_context_mouse_states
-                                            .get(1)
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        app,
-                                    ))
-                                    .with_child(Self::typed_button(
-                                        "clear",
-                                        MonolithCockpitAction::ClearSelectedTenant,
-                                        self.tenant_context_mouse_states
-                                            .get(2)
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        app,
-                                    ))
-                                    .finish(),
-                            )
+                            .with_spacing(6.)
+                            .with_child(Self::primary_typed_button(
+                                "chat",
+                                MonolithCockpitAction::StartTenantChat {
+                                    tenant_name: tenant.name.clone(),
+                                    prompt,
+                                },
+                                self.tenant_context_mouse_states
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "copy",
+                                MonolithCockpitAction::CopyTenantContext {
+                                    tenant_name: tenant.name.clone(),
+                                    context,
+                                },
+                                self.tenant_context_mouse_states
+                                    .get(1)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "clear",
+                                MonolithCockpitAction::ClearSelectedTenant,
+                                self.tenant_context_mouse_states
+                                    .get(2)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                app,
+                            ))
                             .finish(),
                     )
                     .finish(),
