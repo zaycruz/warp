@@ -49,6 +49,9 @@ The rest of the code in this repository is licensed under the [AGPL v3](LICENSE-
 
 Warp's client codebase is open source and lives in this repository. We welcome community contributions and have designed a lightweight workflow to help new contributors get started. For the full contribution flow, read our [CONTRIBUTING.md](CONTRIBUTING.md) guide.
 
+> [!TIP]
+> Maintain another open source project? [Apply for free Oz credits](https://tally.so/r/LZWxqG) to bring agentic workflows like issue triage, PR review, and community management to your repo.
+
 ### Issue to PR
 
 Before filing, [search existing issues](https://github.com/warpdotdev/warp/issues?q=is%3Aissue+is%3Aopen+sort%3Areactions-%2B1-desc) for your bug or feature request. If nothing exists, [file an issue](https://github.com/warpdotdev/warp/issues/new/choose) using our templates. Security vulnerabilities should be reported privately as described in [CONTRIBUTING.md](CONTRIBUTING.md#reporting-security-issues).
