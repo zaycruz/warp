@@ -185,6 +185,60 @@ impl MonolithCockpitView {
         )
     }
 
+    fn remote_interactive_shell_command(host: &HostProfile, workdir: &str) -> String {
+        Self::remote_command(
+            host,
+            &format!(
+                "cd {} && printf '\\nMonolith VM workbench: %s\\n' \"$PWD\" && exec ${{SHELL:-bash}} -l",
+                Self::shell_escape(workdir)
+            ),
+        )
+    }
+
+    fn remote_file_browse_command(host: &HostProfile, workdir: &str) -> String {
+        Self::remote_command(
+            host,
+            &format!(
+                "cd {} && printf '\\nMonolith files: %s\\n\\n' \"$PWD\" && (command -v tree >/dev/null 2>&1 && tree -a -L 2 -I '.git|node_modules|__pycache__|.venv' || find . -maxdepth 2 -not -path './.git/*' -not -path './node_modules/*' -not -path './__pycache__/*' -not -path './.venv/*' | sort | sed 's#^./##') && printf '\\nReady in %s\\n' \"$PWD\" && exec ${{SHELL:-bash}} -l",
+                Self::shell_escape(workdir)
+            ),
+        )
+    }
+
+    fn runtime_agent_prompt(
+        tenant: &TenantProfile,
+        host: &HostProfile,
+        runtime: &RuntimeProfile,
+        service_name: &str,
+    ) -> String {
+        format!(
+            "/agent You are operating inside a Monolith VM runtime.\n\
+Tenant: {}\n\
+Tenant status: {}\n\
+VM: {}\n\
+Zone: {}\n\
+Project: {}\n\
+Runtime: {}\n\
+Runtime status: {}\n\
+Workdir: {}\n\
+Git ref: {}\n\
+Service: {}\n\n\
+Start by opening an SSH workbench if it is not already open:\n{}\n\n\
+Work only in the runtime workdir unless I explicitly widen scope. First inspect files, git status, service status, and recent logs. Do not deploy, restart, start, pause, or mutate production without showing the exact command and getting explicit confirmation.",
+            tenant.name,
+            tenant.environment,
+            host.name,
+            host.zone,
+            host.project.as_deref().unwrap_or(GCP_PROJECT),
+            runtime.name,
+            runtime.status,
+            runtime.workdir,
+            runtime.git_ref,
+            service_name,
+            Self::remote_interactive_shell_command(host, &runtime.workdir)
+        )
+    }
+
     fn tenant_status_label(tenant: &TenantProfile) -> &'static str {
         if tenant.environment.contains("offboarded") {
             "offboarded"
@@ -905,13 +959,9 @@ VMs and runtimes:\n{}",
             format!("printf '%s\\n' {}", Self::shell_escape(&message))
         };
 
-        let runtime_shell = Self::remote_command(
-            host,
-            &format!(
-                "cd {} && exec ${{SHELL:-bash}} -l",
-                Self::shell_escape(&runtime.workdir)
-            ),
-        );
+        let runtime_workbench = Self::remote_interactive_shell_command(host, &runtime.workdir);
+        let file_browse = Self::remote_file_browse_command(host, &runtime.workdir);
+        let runtime_agent_prompt = Self::runtime_agent_prompt(tenant, host, runtime, &service_name);
         let git_status = Self::remote_command(
             host,
             &format!(
@@ -1029,8 +1079,23 @@ VMs and runtimes:\n{}",
                     Flex::row()
                         .with_spacing(6.)
                         .with_child(Self::action_button(
-                            "shell",
-                            runtime_shell,
+                            "workbench",
+                            runtime_workbench,
+                            Self::next_mouse_state(mouse_states, button_index),
+                            app,
+                        ))
+                        .with_child(Self::typed_button(
+                            "agent",
+                            MonolithCockpitAction::StartTenantChat {
+                                tenant_name: tenant.name.clone(),
+                                prompt: runtime_agent_prompt,
+                            },
+                            Self::next_mouse_state(mouse_states, button_index),
+                            app,
+                        ))
+                        .with_child(Self::action_button(
+                            "files",
+                            file_browse,
                             Self::next_mouse_state(mouse_states, button_index),
                             app,
                         ))
