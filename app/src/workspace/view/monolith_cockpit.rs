@@ -65,6 +65,12 @@ pub(crate) struct SelectedRuntimeScope {
     runtime_name: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedHostScope {
+    tenant_name: String,
+    host_name: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum MonolithCockpitAction {
     OpenCommand {
@@ -93,7 +99,12 @@ pub enum MonolithCockpitAction {
         host_name: String,
         runtime_name: String,
     },
+    SelectHost {
+        tenant_name: String,
+        host_name: String,
+    },
     ClearSelectedRuntime,
+    ClearSelectedHost,
     ClearSelectedTenant,
     ShowTenantFilter {
         filter: TenantFilter,
@@ -123,6 +134,8 @@ pub enum TenantFilter {
 pub struct MonolithCockpitView {
     button_mouse_states: Vec<MouseStateHandle>,
     tenant_mouse_states: Vec<MouseStateHandle>,
+    host_mouse_states: Vec<MouseStateHandle>,
+    runtime_mouse_states: Vec<MouseStateHandle>,
     environment_mouse_states: Vec<MouseStateHandle>,
     cloud_mouse_states: Vec<MouseStateHandle>,
     filter_mouse_states: Vec<MouseStateHandle>,
@@ -132,6 +145,7 @@ pub struct MonolithCockpitView {
     expanded_tenants: HashSet<String>,
     tenant_filter: TenantFilter,
     selected_tenant: Option<String>,
+    selected_host: Option<SelectedHostScope>,
     selected_runtime: Option<SelectedRuntimeScope>,
 }
 
@@ -140,6 +154,8 @@ impl MonolithCockpitView {
         Self {
             button_mouse_states: (0..512).map(|_| MouseStateHandle::default()).collect(),
             tenant_mouse_states: (0..128).map(|_| MouseStateHandle::default()).collect(),
+            host_mouse_states: (0..256).map(|_| MouseStateHandle::default()).collect(),
+            runtime_mouse_states: (0..512).map(|_| MouseStateHandle::default()).collect(),
             environment_mouse_states: (0..2).map(|_| MouseStateHandle::default()).collect(),
             cloud_mouse_states: (0..16).map(|_| MouseStateHandle::default()).collect(),
             filter_mouse_states: (0..16).map(|_| MouseStateHandle::default()).collect(),
@@ -149,6 +165,7 @@ impl MonolithCockpitView {
             expanded_tenants: HashSet::new(),
             tenant_filter: TenantFilter::WithVms,
             selected_tenant: None,
+            selected_host: None,
             selected_runtime: None,
         }
     }
@@ -354,6 +371,22 @@ Service: {}",
         Some((tenant, host, runtime))
     }
 
+    fn selected_host_profiles<'a>(
+        profile: &'a CockpitProfile,
+        scope: &SelectedHostScope,
+    ) -> Option<(&'a TenantProfile, &'a HostProfile)> {
+        let tenant = profile
+            .tenants
+            .iter()
+            .find(|tenant| tenant.name == scope.tenant_name)?;
+        let host = tenant
+            .hosts
+            .iter()
+            .find(|host| host.name == scope.host_name)?;
+
+        Some((tenant, host))
+    }
+
     fn tenant_status_label(tenant: &TenantProfile) -> &'static str {
         if tenant.environment.contains("offboarded") {
             "offboarded"
@@ -445,6 +478,14 @@ Service: {}",
             .iter()
             .flat_map(|host| &host.runtimes)
             .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
+            .count()
+    }
+
+    fn visible_host_count(tenant: &TenantProfile, filter: TenantFilter) -> usize {
+        tenant
+            .hosts
+            .iter()
+            .filter(|host| Self::host_matches_filter(host, filter))
             .count()
     }
 
@@ -936,6 +977,7 @@ VMs and runtimes:\n{}",
         let runtime_context =
             Self::runtime_context(tenant, host, runtime, active_environment, api_url);
         let diagnosis_prompt = Self::runtime_diagnosis_prompt(tenant, host, runtime, &service_name);
+        let agent_prompt = Self::runtime_agent_prompt(tenant, host, runtime, &service_name);
         let ssh_command = Self::gcloud_ssh_prefix(host);
         let cd_command = Self::remote_runtime_cd_command(&runtime.workdir);
         let files_command = Self::remote_file_browse_command(host, &runtime.workdir);
@@ -1027,7 +1069,7 @@ VMs and runtimes:\n{}",
                         Flex::column()
                             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                             .with_spacing(5.)
-                            .with_child(Self::section_label("RUNTIME WORKBENCH", app))
+                            .with_child(Self::section_label("RUNTIME", app))
                             .with_child(
                                 Text::new(runtime.name.clone(), appearance.ui_font_family(), 14.)
                                     .with_color(theme.active_ui_text_color().into_solid())
@@ -1063,6 +1105,15 @@ VMs and runtimes:\n{}",
                                 MonolithCockpitAction::StartTenantChat {
                                     tenant_name: tenant.name.clone(),
                                     prompt: diagnosis_prompt,
+                                },
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "agent",
+                                MonolithCockpitAction::StartTenantChat {
+                                    tenant_name: tenant.name.clone(),
+                                    prompt: agent_prompt,
                                 },
                                 Self::next_mouse_state(mouse_states, button_index),
                                 app,
@@ -1146,7 +1197,7 @@ VMs and runtimes:\n{}",
                                 app,
                             ))
                             .with_child(Self::typed_button(
-                                "exit runtime",
+                                "back to vm",
                                 MonolithCockpitAction::ClearSelectedRuntime,
                                 Self::next_mouse_state(mouse_states, button_index),
                                 app,
@@ -1169,8 +1220,6 @@ VMs and runtimes:\n{}",
         active_environment: &str,
         api_url: &str,
         filter: TenantFilter,
-        mouse_states: &[MouseStateHandle],
-        button_index: &mut usize,
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
         let tenant_name = self.selected_tenant.as_ref()?;
@@ -1192,14 +1241,7 @@ VMs and runtimes:\n{}",
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_spacing(8.);
         for host in &visible_hosts {
-            host_list.add_child(Self::host_card(
-                host,
-                tenant,
-                filter,
-                mouse_states,
-                button_index,
-                app,
-            ));
+            host_list.add_child(Self::host_summary_row(host, filter, app));
         }
 
         Some(
@@ -1211,12 +1253,18 @@ VMs and runtimes:\n{}",
                         Flex::column()
                             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                             .with_spacing(6.)
-                            .with_child(Self::section_label("TENANT WORKBENCH", app))
+                            .with_child(Self::section_label("TENANT", app))
+                            .with_child(
+                                Text::new(tenant.name.clone(), appearance.ui_font_family(), 14.)
+                                    .with_color(theme.active_ui_text_color().into_solid())
+                                    .with_style(Properties::default().weight(Weight::Semibold))
+                                    .finish(),
+                            )
                             .with_child(Self::muted_text(
                                 format!(
-                                    "{} / {} · {} vms · runtimes {} / {} running",
-                                    tenant.name,
+                                    "{} · {} / {} vms visible · {} / {} runtimes running",
                                     tenant.environment,
+                                    Self::visible_host_count(tenant, filter),
                                     tenant.hosts.len(),
                                     Self::running_runtime_count(tenant),
                                     Self::runtime_count(tenant)
@@ -1268,7 +1316,10 @@ VMs and runtimes:\n{}",
                         Flex::row()
                             .with_spacing(6.)
                             .with_child(Self::status_chip(
-                                &format!("visible vms {}", visible_hosts.len()),
+                                &format!(
+                                    "visible vms {}",
+                                    Self::visible_host_count(tenant, filter)
+                                ),
                                 app,
                             ))
                             .with_child(Self::status_chip(
@@ -1281,10 +1332,119 @@ VMs and runtimes:\n{}",
                             .with_child(Self::status_chip(Self::tenant_filter_label(filter), app))
                             .finish(),
                     )
+                    .with_child(Self::muted_text(
+                        "Choose a VM in the navigator to open the next stage.",
+                        12.,
+                        app,
+                    ))
                     .with_child(if visible_hosts.is_empty() {
                         Self::muted_text("No VMs match the current fleet filter.", 12., app)
                     } else {
                         host_list.finish()
+                    })
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(10.))
+            .with_background(theme.surface_1())
+            .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish(),
+        )
+    }
+
+    fn render_selected_host_workbench(
+        &self,
+        profile: &CockpitProfile,
+        filter: TenantFilter,
+        mouse_states: &[MouseStateHandle],
+        button_index: &mut usize,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        let scope = self.selected_host.as_ref()?;
+        let (tenant, host) = Self::selected_host_profiles(profile, scope)?;
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let ssh_command = Self::gcloud_ssh_prefix(host);
+        let visible_runtimes = host
+            .runtimes
+            .iter()
+            .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
+            .collect::<Vec<_>>();
+
+        let mut runtime_list = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(8.);
+        for runtime in &visible_runtimes {
+            runtime_list.add_child(Self::runtime_summary_row(
+                runtime,
+                self.selected_runtime.as_ref().is_some_and(|selected| {
+                    selected.host_name == host.name && selected.runtime_name == runtime.name
+                }),
+                app,
+            ));
+        }
+
+        let mut status_row = Flex::row()
+            .with_spacing(6.)
+            .with_child(Self::status_chip(&format!("status {}", host.status), app))
+            .with_child(Self::status_chip(
+                &format!("visible runtimes {}", visible_runtimes.len()),
+                app,
+            ));
+        if let Some(project) = host.project.as_deref() {
+            status_row.add_child(Self::status_chip(&format!("project {project}"), app));
+        }
+
+        Some(
+            Container::new(
+                Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_spacing(10.)
+                    .with_child(
+                        Flex::column()
+                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                            .with_spacing(6.)
+                            .with_child(Self::section_label("VM", app))
+                            .with_child(
+                                Text::new(host.name.clone(), appearance.ui_font_family(), 14.)
+                                    .with_color(theme.active_ui_text_color().into_solid())
+                                    .with_style(Properties::default().weight(Weight::Semibold))
+                                    .finish(),
+                            )
+                            .with_child(Self::muted_text(
+                                format!("{} / {}", tenant.name, host.zone),
+                                11.,
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(status_row.finish())
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::ssh_workbench_button(
+                                "ssh",
+                                ssh_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "back to tenant",
+                                MonolithCockpitAction::ClearSelectedHost,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(Self::muted_text(
+                        "Choose a runtime in the navigator to open the runtime cockpit.",
+                        12.,
+                        app,
+                    ))
+                    .with_child(if visible_runtimes.is_empty() {
+                        Self::muted_text("No runtimes match the current fleet filter.", 12., app)
+                    } else {
+                        runtime_list.finish()
                     })
                     .finish(),
             )
@@ -1362,232 +1522,96 @@ VMs and runtimes:\n{}",
         .finish()
     }
 
-    fn runtime_card(
-        tenant: &TenantProfile,
-        host: &HostProfile,
-        runtime: &RuntimeProfile,
-        mouse_states: &[MouseStateHandle],
-        button_index: &mut usize,
-        app: &AppContext,
-    ) -> Box<dyn Element> {
+    fn render_scope_strip(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        let service_name = Self::runtime_service_name(runtime);
-        let prod_locked = tenant.environment.contains("prod");
-        let inactive_target = tenant.environment.contains("offboarded")
-            || host.status.contains("terminated")
-            || host.status.contains("unknown");
-        let mutation_guard = |action: &str, reason: &str| {
-            let message = format!(
-                "Monolith cockpit blocked {action} for {}/{}/{}: {reason}",
-                tenant.name, host.name, runtime.name
-            );
-            format!("printf '%s\\n' {}", Self::shell_escape(&message))
-        };
+        let tenant = self.selected_tenant.as_deref().unwrap_or("fleet");
+        let host = self
+            .selected_host
+            .as_ref()
+            .map(|scope| scope.host_name.as_str())
+            .unwrap_or("choose vm");
+        let runtime = self
+            .selected_runtime
+            .as_ref()
+            .map(|scope| scope.runtime_name.as_str())
+            .unwrap_or("choose runtime");
 
-        let runtime_workbench = Self::gcloud_ssh_prefix(host);
-        let runtime_cd = Self::remote_runtime_cd_command(&runtime.workdir);
-        let file_browse = Self::remote_file_browse_command(host, &runtime.workdir);
-        let runtime_agent_prompt = Self::runtime_agent_prompt(tenant, host, runtime, &service_name);
-        let git_status = Self::remote_command(
-            host,
-            &format!(
-                "cd {} && git status --short --branch",
-                Self::shell_escape(&runtime.workdir)
-            ),
-        );
-        let logs = Self::remote_command(
-            host,
-            &format!(
-                "cd {} && (test -d logs && tail -n 200 -f logs/*.log || journalctl --user -u {} -f)",
-                Self::shell_escape(&runtime.workdir),
-                Self::shell_escape(&service_name),
-            ),
-        );
-        let deploy = if prod_locked {
-            mutation_guard("deploy", "prod writes require explicit elevated workflow")
-        } else if inactive_target {
-            mutation_guard("deploy", "target is offboarded, terminated, or unknown")
-        } else {
-            Self::remote_command(
-                host,
-                &format!(
-                    "cd {} && ./deploy.sh --tenant {} --runtime {}",
-                    Self::shell_escape(&runtime.workdir),
-                    Self::shell_escape(&tenant.name),
-                    Self::shell_escape(&runtime.name),
-                ),
-            )
-        };
-        let start = if prod_locked {
-            mutation_guard("start", "prod writes require explicit elevated workflow")
-        } else if inactive_target {
-            mutation_guard("start", "target is offboarded, terminated, or unknown")
-        } else {
-            Self::remote_command(
-                host,
-                &format!(
-                    "systemctl --user start {}",
-                    Self::shell_escape(&service_name)
-                ),
-            )
-        };
-        let pause = if prod_locked {
-            mutation_guard("pause", "prod writes require explicit elevated workflow")
-        } else if inactive_target {
-            mutation_guard("pause", "target is offboarded, terminated, or unknown")
-        } else {
-            Self::remote_command(
-                host,
-                &format!(
-                    "systemctl --user stop {}",
-                    Self::shell_escape(&service_name)
-                ),
-            )
-        };
-        let restart = if prod_locked {
-            mutation_guard("restart", "prod writes require explicit elevated workflow")
-        } else if inactive_target {
-            mutation_guard("restart", "target is offboarded, terminated, or unknown")
-        } else {
-            Self::remote_command(
-                host,
-                &format!(
-                    "systemctl --user restart {}",
-                    Self::shell_escape(&service_name)
-                ),
-            )
-        };
-
-        let header = Flex::row()
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Flex::row()
-                    .with_spacing(8.)
-                    .with_child(
-                        ConstrainedBox::new(
-                            Icon::Dataflow
-                                .to_warpui_icon(theme.sub_text_color(theme.background()))
-                                .finish(),
-                        )
-                        .with_width(14.)
-                        .with_height(14.)
-                        .finish(),
-                    )
-                    .with_child(
-                        Text::new(runtime.name.clone(), appearance.ui_font_family(), 12.)
-                            .with_color(theme.active_ui_text_color().into_solid())
-                            .with_style(Properties::default().weight(Weight::Semibold))
-                            .finish(),
-                    )
-                    .finish(),
-            )
-            .with_child(
-                Text::new(runtime.status.clone(), appearance.ui_font_family(), 10.)
-                    .with_color(theme.disabled_ui_text_color().into_solid())
-                    .finish(),
-            )
-            .finish();
+        let mut actions = Flex::row().with_spacing(6.);
+        if self.selected_runtime.is_some() {
+            actions.add_child(Self::typed_button(
+                "exit runtime",
+                MonolithCockpitAction::ClearSelectedRuntime,
+                self.tenant_context_mouse_states
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
+                app,
+            ));
+        }
+        if self.selected_host.is_some() {
+            actions.add_child(Self::typed_button(
+                "back to tenant",
+                MonolithCockpitAction::ClearSelectedHost,
+                self.tenant_context_mouse_states
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_default(),
+                app,
+            ));
+        }
+        if self.selected_tenant.is_some() {
+            actions.add_child(Self::typed_button(
+                "clear scope",
+                MonolithCockpitAction::ClearSelectedTenant,
+                self.tenant_context_mouse_states
+                    .get(2)
+                    .cloned()
+                    .unwrap_or_default(),
+                app,
+            ));
+        }
 
         Container::new(
             Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_spacing(8.)
+                .with_child(Self::section_label("SCOPE", app))
+                .with_child(
+                    Flex::row()
+                        .with_spacing(6.)
+                        .with_child(Self::status_chip(&format!("tenant {tenant}"), app))
+                        .with_child(Self::status_chip(&format!("vm {host}"), app))
+                        .with_child(Self::status_chip(&format!("runtime {runtime}"), app))
+                        .finish(),
+                )
+                .with_child(
+                    Text::new(
+                        "Navigate top-down: tenant > VM > runtime. Actions appear only at the selected level.",
+                        appearance.ui_font_family(),
+                        11.,
+                    )
+                    .with_color(theme.disabled_ui_text_color().into_solid())
+                    .finish(),
+                )
+                .with_child(actions.finish())
+                .finish(),
+        )
+        .with_padding(Padding::uniform(10.))
+        .with_background(theme.surface_1())
+        .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .finish()
+    }
+
+    fn stage_empty_state(title: &str, message: &str, app: &AppContext) -> Box<dyn Element> {
+        let theme = Appearance::as_ref(app).theme();
+        Container::new(
+            Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_spacing(6.)
-                .with_child(header)
-                .with_child(Self::meta_text(format!("{}", runtime.workdir), app))
-                .with_child(Self::meta_text(
-                    format!("git {} · {}", runtime.git_ref, service_name),
-                    app,
-                ))
-                .with_child(
-                    Flex::row()
-                        .with_spacing(6.)
-                        .with_child(Self::ssh_workbench_button(
-                            "ssh",
-                            runtime_workbench,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::typed_button(
-                            "focus",
-                            MonolithCockpitAction::SelectRuntime {
-                                tenant_name: tenant.name.clone(),
-                                host_name: host.name.clone(),
-                                runtime_name: runtime.name.clone(),
-                            },
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::terminal_command_button(
-                            "cd",
-                            runtime_cd,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::typed_button(
-                            "agent",
-                            MonolithCockpitAction::StartTenantChat {
-                                tenant_name: tenant.name.clone(),
-                                prompt: runtime_agent_prompt,
-                            },
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::action_button(
-                            "files",
-                            file_browse,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .finish(),
-                )
-                .with_child(
-                    Flex::row()
-                        .with_spacing(6.)
-                        .with_child(Self::action_button(
-                            "git",
-                            git_status,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::action_button(
-                            "logs",
-                            logs,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .finish(),
-                )
-                .with_child(
-                    Flex::row()
-                        .with_spacing(6.)
-                        .with_child(Self::action_button(
-                            "deploy",
-                            deploy,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::action_button(
-                            "start",
-                            start,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::action_button(
-                            "pause",
-                            pause,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .with_child(Self::action_button(
-                            "restart",
-                            restart,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
-                        .finish(),
-                )
+                .with_child(Self::section_label(title, app))
+                .with_child(Self::muted_text(message, 12., app))
                 .finish(),
         )
         .with_padding(Padding::uniform(8.))
@@ -1597,40 +1621,18 @@ VMs and runtimes:\n{}",
         .finish()
     }
 
-    fn host_card(
+    fn host_summary_row(
         host: &HostProfile,
-        tenant: &TenantProfile,
         filter: TenantFilter,
-        mouse_states: &[MouseStateHandle],
-        button_index: &mut usize,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        let ssh_command = Self::gcloud_ssh_prefix(host);
-
-        let mut runtimes = Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(8.);
-        for runtime in host
-            .runtimes
-            .iter()
-            .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
-        {
-            runtimes.add_child(Self::runtime_card(
-                tenant,
-                host,
-                runtime,
-                mouse_states,
-                button_index,
-                app,
-            ));
-        }
 
         Container::new(
             Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_spacing(7.)
+                .with_spacing(5.)
                 .with_child(
                     Flex::row()
                         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -1652,19 +1654,13 @@ VMs and runtimes:\n{}",
                                 )
                                 .finish(),
                         )
-                        .with_child(Self::ssh_workbench_button(
-                            "ssh",
-                            ssh_command,
-                            Self::next_mouse_state(mouse_states, button_index),
-                            app,
-                        ))
+                        .with_child(Self::status_chip(&host.status, app))
                         .finish(),
                 )
                 .with_child(Self::meta_text(
                     format!(
-                        "{} · {} · runtimes {} / {} visible",
+                        "{} · runtimes {} / {} visible",
                         host.zone,
-                        host.status,
                         host.runtimes
                             .iter()
                             .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
@@ -1673,7 +1669,6 @@ VMs and runtimes:\n{}",
                     ),
                     app,
                 ))
-                .with_child(runtimes.finish())
                 .finish(),
         )
         .with_padding(Padding::uniform(8.))
@@ -1683,12 +1678,209 @@ VMs and runtimes:\n{}",
         .finish()
     }
 
+    fn runtime_summary_row(
+        runtime: &RuntimeProfile,
+        is_selected: bool,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let service_name = Self::runtime_service_name(runtime);
+
+        let mut container = Container::new(
+            Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_spacing(5.)
+                .with_child(
+                    Flex::row()
+                        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_child(
+                            Text::new(runtime.name.clone(), appearance.ui_font_family(), 12.)
+                                .with_color(theme.active_ui_text_color().into_solid())
+                                .with_style(Properties::default().weight(Weight::Semibold))
+                                .finish(),
+                        )
+                        .with_child(Self::status_chip(&runtime.status, app))
+                        .finish(),
+                )
+                .with_child(Self::meta_text(runtime.workdir.clone(), app))
+                .with_child(Self::meta_text(
+                    format!("git {} · {}", runtime.git_ref, service_name),
+                    app,
+                ))
+                .finish(),
+        )
+        .with_padding(Padding::uniform(8.))
+        .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+
+        if is_selected {
+            container = container.with_background(theme.surface_1());
+        }
+
+        container.finish()
+    }
+
+    fn host_navigator_row(
+        tenant: &TenantProfile,
+        host: &HostProfile,
+        filter: TenantFilter,
+        is_selected: bool,
+        mouse_state: MouseStateHandle,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let tenant_name = tenant.name.clone();
+        let host_name = host.name.clone();
+
+        Hoverable::new(mouse_state, |_| {
+            let mut container = Container::new(
+                Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_spacing(4.)
+                    .with_child(
+                        Flex::row()
+                            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                            .with_child(
+                                Text::new(
+                                    format!("VM {}", host.name),
+                                    appearance.ui_font_family(),
+                                    12.,
+                                )
+                                .with_color(theme.active_ui_text_color().into_solid())
+                                .with_style(Properties::default().weight(Weight::Semibold))
+                                .finish(),
+                            )
+                            .with_child(Self::status_chip(&host.status, app))
+                            .finish(),
+                    )
+                    .with_child(Self::meta_text(
+                        format!(
+                            "{} · runtimes {} / {} visible",
+                            host.zone,
+                            host.runtimes
+                                .iter()
+                                .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
+                                .count(),
+                            host.runtimes.len()
+                        ),
+                        app,
+                    ))
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(6.).with_left(18.))
+            .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+
+            if is_selected {
+                container = container.with_background(theme.surface_1());
+            }
+
+            container.finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(MonolithCockpitAction::SelectHost {
+                tenant_name: tenant_name.clone(),
+                host_name: host_name.clone(),
+            });
+        })
+        .finish()
+    }
+
+    fn runtime_navigator_row(
+        tenant: &TenantProfile,
+        host: &HostProfile,
+        runtime: &RuntimeProfile,
+        is_selected: bool,
+        mouse_state: MouseStateHandle,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let tenant_name = tenant.name.clone();
+        let host_name = host.name.clone();
+        let runtime_name = runtime.name.clone();
+
+        Hoverable::new(mouse_state, |_| {
+            let mut container = Container::new(
+                Flex::row()
+                    .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(8.)
+                            .with_child(
+                                ConstrainedBox::new(
+                                    Icon::Dataflow
+                                        .to_warpui_icon(theme.sub_text_color(theme.background()))
+                                        .finish(),
+                                )
+                                .with_width(14.)
+                                .with_height(14.)
+                                .finish(),
+                            )
+                            .with_child(
+                                Flex::column()
+                                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                                    .with_spacing(3.)
+                                    .with_child(
+                                        Text::new(
+                                            runtime.name.clone(),
+                                            appearance.ui_font_family(),
+                                            12.,
+                                        )
+                                        .with_color(theme.active_ui_text_color().into_solid())
+                                        .with_style(Properties::default().weight(Weight::Semibold))
+                                        .finish(),
+                                    )
+                                    .with_child(Self::meta_text(
+                                        format!("{} · git {}", runtime.workdir, runtime.git_ref),
+                                        app,
+                                    ))
+                                    .finish(),
+                            )
+                            .finish(),
+                    )
+                    .with_child(Self::status_chip(&runtime.status, app))
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(6.).with_left(34.))
+            .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+
+            if is_selected {
+                container = container.with_background(theme.surface_1());
+            }
+
+            container.finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(MonolithCockpitAction::SelectRuntime {
+                tenant_name: tenant_name.clone(),
+                host_name: host_name.clone(),
+                runtime_name: runtime_name.clone(),
+            });
+        })
+        .finish()
+    }
+
     fn tenant_card(
         tenant: &TenantProfile,
         is_expanded: bool,
         tenant_mouse_state: MouseStateHandle,
+        host_mouse_states: &[MouseStateHandle],
+        host_index: &mut usize,
+        runtime_mouse_states: &[MouseStateHandle],
+        runtime_index: &mut usize,
         filter: TenantFilter,
         is_selected: bool,
+        selected_host: Option<&SelectedHostScope>,
+        selected_runtime: Option<&SelectedRuntimeScope>,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
@@ -1753,8 +1945,9 @@ VMs and runtimes:\n{}",
         if is_expanded {
             content.add_child(Self::muted_text(
                 format!(
-                    "{} · {} vms · {} / {} runtimes visible",
+                    "{} · {} / {} vms visible · {} / {} runtimes visible",
                     tenant.environment,
+                    Self::visible_host_count(tenant, filter),
                     tenant.hosts.len(),
                     Self::visible_runtime_count(tenant, filter),
                     Self::runtime_count(tenant)
@@ -1762,6 +1955,42 @@ VMs and runtimes:\n{}",
                 12.,
                 app,
             ));
+
+            for host in tenant
+                .hosts
+                .iter()
+                .filter(|host| Self::host_matches_filter(host, filter))
+            {
+                content.add_child(Self::host_navigator_row(
+                    tenant,
+                    host,
+                    filter,
+                    selected_host.is_some_and(|scope| {
+                        scope.tenant_name == tenant.name && scope.host_name == host.name
+                    }),
+                    Self::next_mouse_state(host_mouse_states, host_index),
+                    app,
+                ));
+
+                for runtime in host
+                    .runtimes
+                    .iter()
+                    .filter(|runtime| Self::runtime_matches_filter(runtime, filter))
+                {
+                    content.add_child(Self::runtime_navigator_row(
+                        tenant,
+                        host,
+                        runtime,
+                        selected_runtime.is_some_and(|scope| {
+                            scope.tenant_name == tenant.name
+                                && scope.host_name == host.name
+                                && scope.runtime_name == runtime.name
+                        }),
+                        Self::next_mouse_state(runtime_mouse_states, runtime_index),
+                        app,
+                    ));
+                }
+            }
         }
 
         let mut container = Container::new(content.finish())
@@ -1827,12 +2056,18 @@ impl TypedActionView for MonolithCockpitView {
                 context,
             } => {
                 self.selected_tenant = Some(tenant_name.clone());
+                self.selected_host = None;
+                self.selected_runtime = None;
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(context.clone()));
                 ctx.notify();
             }
             MonolithCockpitAction::CopyRuntimeContext { scope, context } => {
                 self.selected_tenant = Some(scope.tenant_name.clone());
+                self.selected_host = Some(SelectedHostScope {
+                    tenant_name: scope.tenant_name.clone(),
+                    host_name: scope.host_name.clone(),
+                });
                 self.selected_runtime = Some(scope.clone());
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(context.clone()));
@@ -1844,6 +2079,10 @@ impl TypedActionView for MonolithCockpitView {
                 runtime_name,
             } => {
                 self.selected_tenant = Some(tenant_name.clone());
+                self.selected_host = Some(SelectedHostScope {
+                    tenant_name: tenant_name.clone(),
+                    host_name: host_name.clone(),
+                });
                 self.selected_runtime = Some(SelectedRuntimeScope {
                     tenant_name: tenant_name.clone(),
                     host_name: host_name.clone(),
@@ -1852,8 +2091,27 @@ impl TypedActionView for MonolithCockpitView {
                 self.expanded_tenants.insert(tenant_name.clone());
                 ctx.notify();
             }
+            MonolithCockpitAction::SelectHost {
+                tenant_name,
+                host_name,
+            } => {
+                self.selected_tenant = Some(tenant_name.clone());
+                self.selected_host = Some(SelectedHostScope {
+                    tenant_name: tenant_name.clone(),
+                    host_name: host_name.clone(),
+                });
+                self.selected_runtime = None;
+                self.expanded_tenants.insert(tenant_name.clone());
+                ctx.notify();
+            }
             MonolithCockpitAction::ClearSelectedTenant => {
                 self.selected_tenant = None;
+                self.selected_host = None;
+                self.selected_runtime = None;
+                ctx.notify();
+            }
+            MonolithCockpitAction::ClearSelectedHost => {
+                self.selected_host = None;
                 self.selected_runtime = None;
                 ctx.notify();
             }
@@ -1895,6 +2153,7 @@ impl TypedActionView for MonolithCockpitView {
             }
             MonolithCockpitAction::ToggleTenant { tenant_name } => {
                 self.selected_tenant = Some(tenant_name.clone());
+                self.selected_host = None;
                 self.selected_runtime = None;
                 if !self.expanded_tenants.insert(tenant_name.clone()) {
                     self.expanded_tenants.remove(tenant_name);
@@ -1903,6 +2162,7 @@ impl TypedActionView for MonolithCockpitView {
             }
             MonolithCockpitAction::SwitchEnvironment { environment } => {
                 self.selected_tenant = None;
+                self.selected_host = None;
                 self.selected_runtime = None;
                 self.expanded_tenants.clear();
                 MonolithSettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -1946,6 +2206,8 @@ impl View for MonolithCockpitView {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_spacing(12.);
         let mut button_index = 0;
+        let mut host_index = 0;
+        let mut runtime_index = 0;
         for (tenant_index, tenant) in filtered_tenants.iter().enumerate() {
             let tenant_mouse_state = self
                 .tenant_mouse_states
@@ -1956,164 +2218,131 @@ impl View for MonolithCockpitView {
                 tenant,
                 self.tenant_is_expanded(tenant),
                 tenant_mouse_state,
+                &self.host_mouse_states,
+                &mut host_index,
+                &self.runtime_mouse_states,
+                &mut runtime_index,
                 self.tenant_filter,
                 self.selected_tenant
                     .as_ref()
                     .is_some_and(|selected| selected == &tenant.name),
+                self.selected_host.as_ref(),
+                self.selected_runtime.as_ref(),
                 app,
             ));
         }
 
-        let mut body = Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_spacing(14.)
-            .with_child(
-                Text::new("Monolith", appearance.ui_font_family(), 18.)
-                    .with_color(theme.active_ui_text_color().into_solid())
-                    .with_style(Properties::default().weight(Weight::Bold))
-                    .finish(),
-            )
-            .with_child(self.render_environment_switcher(app))
-            .with_child(self.render_cloud_toolbar(app))
-            .with_child(self.render_cockpit_summary(&profile, app));
-
-        if let Some(scope) = self.selected_runtime.as_ref() {
-            if let Some(selected_runtime_workbench) = self.render_selected_runtime_workbench(
-                &profile,
-                scope,
-                &active_environment,
-                &api_url,
-                &self.button_mouse_states,
-                &mut button_index,
-                app,
-            ) {
-                body.add_child(selected_runtime_workbench);
-            }
-        }
-
-        if let Some(selected_workbench) = self.render_selected_tenant_workbench(
-            &profile,
-            &active_environment,
-            &api_url,
-            self.tenant_filter,
-            &self.button_mouse_states,
-            &mut button_index,
-            app,
-        ) {
-            body.add_child(selected_workbench);
-        }
-
-        if let Some(status) = profile_status {
-            body.add_child(
-                Text::new(status, appearance.ui_font_family(), 11.)
-                    .with_color(theme.disabled_ui_text_color().into_solid())
-                    .finish(),
-            );
-        }
-
-        body.add_child(Self::section_label("FLEET TREE", app));
         let tenant_names = filtered_tenants
             .iter()
             .map(|tenant| tenant.name.clone())
             .collect::<Vec<_>>();
         let mut filter_button_index = 0;
-        body.add_child(
-            Flex::row()
-                .with_spacing(6.)
-                .with_child(Self::tenant_filter_button(
-                    &format!("all {}", Self::filter_count(&profile, TenantFilter::All)),
-                    TenantFilter::All,
-                    self.tenant_filter == TenantFilter::All,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .with_child(Self::tenant_filter_button(
-                    &format!(
-                        "active {}",
-                        Self::filter_count(&profile, TenantFilter::Active)
-                    ),
-                    TenantFilter::Active,
-                    self.tenant_filter == TenantFilter::Active,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .with_child(Self::tenant_filter_button(
-                    &format!(
-                        "offboarded {}",
-                        Self::filter_count(&profile, TenantFilter::Offboarded)
-                    ),
-                    TenantFilter::Offboarded,
-                    self.tenant_filter == TenantFilter::Offboarded,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .finish(),
-        );
-
-        body.add_child(
-            Flex::row()
-                .with_spacing(6.)
-                .with_child(Self::tenant_filter_button(
-                    &format!(
-                        "with vms {}",
-                        Self::filter_count(&profile, TenantFilter::WithVms)
-                    ),
-                    TenantFilter::WithVms,
-                    self.tenant_filter == TenantFilter::WithVms,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .with_child(Self::tenant_filter_button(
-                    &format!(
-                        "running {}",
-                        Self::filter_count(&profile, TenantFilter::RunningAgents)
-                    ),
-                    TenantFilter::RunningAgents,
-                    self.tenant_filter == TenantFilter::RunningAgents,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .with_child(Self::tenant_filter_button(
-                    &format!(
-                        "down {}",
-                        Self::filter_count(&profile, TenantFilter::DownAgents)
-                    ),
-                    TenantFilter::DownAgents,
-                    self.tenant_filter == TenantFilter::DownAgents,
-                    Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
-                    app,
-                ))
-                .finish(),
-        );
-
         let mut fleet_control_button_index = 0;
-        body.add_child(
-            Flex::row()
-                .with_spacing(6.)
-                .with_child(Self::typed_button(
-                    "expand",
-                    MonolithCockpitAction::ExpandAllTenants { tenant_names },
-                    Self::next_mouse_state(
-                        &self.fleet_control_mouse_states,
-                        &mut fleet_control_button_index,
-                    ),
-                    app,
-                ))
-                .with_child(Self::typed_button(
-                    "collapse",
-                    MonolithCockpitAction::CollapseAllTenants,
-                    Self::next_mouse_state(
-                        &self.fleet_control_mouse_states,
-                        &mut fleet_control_button_index,
-                    ),
-                    app,
-                ))
-                .finish(),
-        );
+
+        let mut navigator = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_spacing(14.)
+            .with_child(
+                Text::new("Fleet Navigator", appearance.ui_font_family(), 18.)
+                    .with_color(theme.active_ui_text_color().into_solid())
+                    .with_style(Properties::default().weight(Weight::Bold))
+                    .finish(),
+            )
+            .with_child(Self::section_label("FLEET TREE", app))
+            .with_child(
+                Flex::row()
+                    .with_spacing(6.)
+                    .with_child(Self::tenant_filter_button(
+                        &format!("all {}", Self::filter_count(&profile, TenantFilter::All)),
+                        TenantFilter::All,
+                        self.tenant_filter == TenantFilter::All,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .with_child(Self::tenant_filter_button(
+                        &format!(
+                            "active {}",
+                            Self::filter_count(&profile, TenantFilter::Active)
+                        ),
+                        TenantFilter::Active,
+                        self.tenant_filter == TenantFilter::Active,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .with_child(Self::tenant_filter_button(
+                        &format!(
+                            "offboarded {}",
+                            Self::filter_count(&profile, TenantFilter::Offboarded)
+                        ),
+                        TenantFilter::Offboarded,
+                        self.tenant_filter == TenantFilter::Offboarded,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .finish(),
+            )
+            .with_child(
+                Flex::row()
+                    .with_spacing(6.)
+                    .with_child(Self::tenant_filter_button(
+                        &format!(
+                            "with vms {}",
+                            Self::filter_count(&profile, TenantFilter::WithVms)
+                        ),
+                        TenantFilter::WithVms,
+                        self.tenant_filter == TenantFilter::WithVms,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .with_child(Self::tenant_filter_button(
+                        &format!(
+                            "running {}",
+                            Self::filter_count(&profile, TenantFilter::RunningAgents)
+                        ),
+                        TenantFilter::RunningAgents,
+                        self.tenant_filter == TenantFilter::RunningAgents,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .with_child(Self::tenant_filter_button(
+                        &format!(
+                            "down {}",
+                            Self::filter_count(&profile, TenantFilter::DownAgents)
+                        ),
+                        TenantFilter::DownAgents,
+                        self.tenant_filter == TenantFilter::DownAgents,
+                        Self::next_mouse_state(&self.filter_mouse_states, &mut filter_button_index),
+                        app,
+                    ))
+                    .finish(),
+            )
+            .with_child(
+                Flex::row()
+                    .with_spacing(6.)
+                    .with_child(Self::typed_button(
+                        "expand",
+                        MonolithCockpitAction::ExpandAllTenants { tenant_names },
+                        Self::next_mouse_state(
+                            &self.fleet_control_mouse_states,
+                            &mut fleet_control_button_index,
+                        ),
+                        app,
+                    ))
+                    .with_child(Self::typed_button(
+                        "collapse",
+                        MonolithCockpitAction::CollapseAllTenants,
+                        Self::next_mouse_state(
+                            &self.fleet_control_mouse_states,
+                            &mut fleet_control_button_index,
+                        ),
+                        app,
+                    ))
+                    .finish(),
+            );
 
         if profile.tenants.is_empty() {
-            body.add_child(
+            navigator.add_child(
                 Text::new(
                     "No live Monolith cockpit profile is configured.".to_string(),
                     appearance.ui_font_family(),
@@ -2123,7 +2352,7 @@ impl View for MonolithCockpitView {
                 .finish(),
             );
         } else if filtered_tenants.is_empty() {
-            body.add_child(
+            navigator.add_child(
                 Text::new(
                     format!(
                         "No tenants match filter: {}",
@@ -2137,11 +2366,115 @@ impl View for MonolithCockpitView {
             );
         }
 
-        body.add_child(tenants.finish());
+        navigator.add_child(tenants.finish());
+
+        let mut workbench = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_spacing(14.)
+            .with_child(
+                Text::new("Monolith Cockpit", appearance.ui_font_family(), 18.)
+                    .with_color(theme.active_ui_text_color().into_solid())
+                    .with_style(Properties::default().weight(Weight::Bold))
+                    .finish(),
+            )
+            .with_child(self.render_environment_switcher(app))
+            .with_child(self.render_cloud_toolbar(app))
+            .with_child(self.render_cockpit_summary(&profile, app))
+            .with_child(self.render_scope_strip(app));
+
+        if let Some(status) = profile_status {
+            workbench.add_child(
+                Text::new(status, appearance.ui_font_family(), 11.)
+                    .with_color(theme.disabled_ui_text_color().into_solid())
+                    .finish(),
+            );
+        }
+
+        if let Some(selected_tenant_workbench) = self.render_selected_tenant_workbench(
+            &profile,
+            &active_environment,
+            &api_url,
+            self.tenant_filter,
+            app,
+        ) {
+            workbench.add_child(selected_tenant_workbench);
+        } else {
+            workbench.add_child(Self::stage_empty_state(
+                "TENANT",
+                "Select a tenant from the navigator to open the tenant workbench.",
+                app,
+            ));
+        }
+
+        if let Some(selected_host_workbench) = self.render_selected_host_workbench(
+            &profile,
+            self.tenant_filter,
+            &self.button_mouse_states,
+            &mut button_index,
+            app,
+        ) {
+            workbench.add_child(selected_host_workbench);
+        } else {
+            workbench.add_child(Self::stage_empty_state(
+                "VM",
+                "Select a VM under the active tenant to inspect host-level details.",
+                app,
+            ));
+        }
+
+        if let Some(scope) = self.selected_runtime.as_ref() {
+            if let Some(selected_runtime_workbench) = self.render_selected_runtime_workbench(
+                &profile,
+                scope,
+                &active_environment,
+                &api_url,
+                &self.button_mouse_states,
+                &mut button_index,
+                app,
+            ) {
+                workbench.add_child(selected_runtime_workbench);
+            }
+        } else {
+            workbench.add_child(Self::stage_empty_state(
+                "RUNTIME",
+                "Select a runtime to open diagnostics, shell, and guarded actions.",
+                app,
+            ));
+        }
+
+        let content = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(12.)
+            .with_child(
+                ConstrainedBox::new(
+                    Container::new(navigator.finish())
+                        .with_padding(Padding::uniform(10.))
+                        .with_background(theme.surface_1())
+                        .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+                        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+                        .finish(),
+                )
+                .with_width(380.)
+                .finish(),
+            )
+            .with_child(
+                Shrinkable::new(
+                    1.0,
+                    Container::new(workbench.finish())
+                        .with_padding(Padding::uniform(10.))
+                        .with_background(theme.surface_1())
+                        .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+                        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+                        .finish(),
+                )
+                .finish(),
+            )
+            .finish();
 
         let scrollable = ClippedScrollable::vertical(
             self.scroll_state.clone(),
-            Container::new(body.finish())
+            Container::new(content)
                 .with_padding(Padding::uniform(12.))
                 .finish(),
             ScrollbarWidth::Auto,
