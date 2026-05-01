@@ -77,9 +77,6 @@ pub enum MonolithCockpitAction {
         tenant_name: String,
         context: String,
     },
-    SetTenantContext {
-        tenant_name: String,
-    },
     ClearSelectedTenant,
     ShowTenantFilter {
         filter: TenantFilter,
@@ -787,6 +784,11 @@ VMs and runtimes:\n{}",
                         self.cloud_mouse_states.get(1).cloned().unwrap_or_default(),
                         app,
                     ))
+                    .finish(),
+            )
+            .with_child(
+                Flex::row()
+                    .with_spacing(6.)
                     .with_child(Self::action_button(
                         "project",
                         project_command,
@@ -825,12 +827,12 @@ VMs and runtimes:\n{}",
             Container::new(
                 Flex::column()
                     .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_spacing(7.)
-                    .with_child(Self::section_label("TENANT CONTEXT", app))
+                    .with_spacing(8.)
                     .with_child(
                         Flex::column()
                             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                            .with_spacing(4.)
+                            .with_spacing(6.)
+                            .with_child(Self::section_label("CURRENT TENANT", app))
                             .with_child(
                                 Text::new(tenant.name.clone(), appearance.ui_font_family(), 13.)
                                     .with_color(theme.active_ui_text_color().into_solid())
@@ -839,7 +841,7 @@ VMs and runtimes:\n{}",
                             )
                             .with_child(Self::muted_text(
                                 format!(
-                                    "{} · {} vms · {} / {} running",
+                                    "{} · {} vms · {} / {} runtimes running",
                                     tenant.environment,
                                     tenant.hosts.len(),
                                     Self::running_runtime_count(tenant),
@@ -851,34 +853,40 @@ VMs and runtimes:\n{}",
                             .finish(),
                     )
                     .with_child(
-                        Flex::row()
+                        Flex::column()
+                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                             .with_spacing(6.)
-                            .with_child(Self::primary_typed_button(
-                                "chat",
-                                MonolithCockpitAction::StartTenantChat {
-                                    tenant_name: tenant.name.clone(),
-                                    prompt,
-                                },
-                                self.tenant_context_mouse_states
-                                    .first()
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                app,
-                            ))
+                            .with_child(
+                                Flex::row()
+                                    .with_spacing(6.)
+                                    .with_child(Self::primary_typed_button(
+                                        "manage in chat",
+                                        MonolithCockpitAction::StartTenantChat {
+                                            tenant_name: tenant.name.clone(),
+                                            prompt,
+                                        },
+                                        self.tenant_context_mouse_states
+                                            .first()
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                        app,
+                                    ))
+                                    .with_child(Self::typed_button(
+                                        "copy context",
+                                        MonolithCockpitAction::CopyTenantContext {
+                                            tenant_name: tenant.name.clone(),
+                                            context,
+                                        },
+                                        self.tenant_context_mouse_states
+                                            .get(1)
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                        app,
+                                    ))
+                                    .finish(),
+                            )
                             .with_child(Self::typed_button(
-                                "copy",
-                                MonolithCockpitAction::CopyTenantContext {
-                                    tenant_name: tenant.name.clone(),
-                                    context,
-                                },
-                                self.tenant_context_mouse_states
-                                    .get(1)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                app,
-                            ))
-                            .with_child(Self::typed_button(
-                                "clear",
+                                "exit tenant",
                                 MonolithCockpitAction::ClearSelectedTenant,
                                 self.tenant_context_mouse_states
                                     .get(2)
@@ -890,7 +898,7 @@ VMs and runtimes:\n{}",
                     )
                     .finish(),
             )
-            .with_padding(Padding::uniform(8.).with_left(10.).with_right(10.))
+            .with_padding(Padding::uniform(10.))
             .with_background(theme.surface_1())
             .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
@@ -938,6 +946,11 @@ VMs and runtimes:\n{}",
                         .with_child(Self::status_chip(&format!("tenants {tenants}"), app))
                         .with_child(Self::status_chip(&format!("active {active}"), app))
                         .with_child(Self::status_chip(&format!("offboarded {offboarded}"), app))
+                        .finish(),
+                )
+                .with_child(
+                    Flex::row()
+                        .with_spacing(6.)
                         .with_child(Self::status_chip(&format!("vms {vms}"), app))
                         .with_child(Self::status_chip(&format!("runtimes {runtimes}"), app))
                         .finish(),
@@ -1090,13 +1103,11 @@ VMs and runtimes:\n{}",
         Container::new(
             Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_spacing(7.)
+                .with_spacing(6.)
                 .with_child(header)
+                .with_child(Self::meta_text(format!("{}", runtime.workdir), app))
                 .with_child(Self::meta_text(
-                    format!(
-                        "{} · git {} · {}",
-                        runtime.workdir, runtime.git_ref, service_name
-                    ),
+                    format!("git {} · {}", runtime.git_ref, service_name),
                     app,
                 ))
                 .with_child(
@@ -1129,6 +1140,11 @@ VMs and runtimes:\n{}",
                             Self::next_mouse_state(mouse_states, button_index),
                             app,
                         ))
+                        .finish(),
+                )
+                .with_child(
+                    Flex::row()
+                        .with_spacing(6.)
                         .with_child(Self::action_button(
                             "git",
                             git_status,
@@ -1141,6 +1157,11 @@ VMs and runtimes:\n{}",
                             Self::next_mouse_state(mouse_states, button_index),
                             app,
                         ))
+                        .finish(),
+                )
+                .with_child(
+                    Flex::row()
+                        .with_spacing(6.)
                         .with_child(Self::action_button(
                             "deploy",
                             deploy,
@@ -1169,7 +1190,8 @@ VMs and runtimes:\n{}",
                 )
                 .finish(),
         )
-        .with_padding(Padding::uniform(8.).with_left(10.).with_right(10.))
+        .with_padding(Padding::uniform(8.))
+        .with_background(theme.surface_1())
         .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
         .finish()
@@ -1240,7 +1262,7 @@ VMs and runtimes:\n{}",
                 )
                 .with_child(Self::meta_text(
                     format!(
-                        "{} · {} · {} / {} runtimes visible",
+                        "{} · {} · runtimes {} / {} visible",
                         host.zone,
                         host.status,
                         host.runtimes
@@ -1254,7 +1276,8 @@ VMs and runtimes:\n{}",
                 .with_child(runtimes.finish())
                 .finish(),
         )
-        .with_padding(Padding::uniform(8.).with_left(10.).with_right(10.))
+        .with_padding(Padding::uniform(8.))
+        .with_background(theme.surface_1())
         .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
         .finish()
@@ -1275,7 +1298,7 @@ VMs and runtimes:\n{}",
 
         let mut hosts = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(8.);
+            .with_spacing(6.);
         for host in tenant
             .hosts
             .iter()
@@ -1298,19 +1321,6 @@ VMs and runtimes:\n{}",
         };
 
         let tenant_name = tenant.name.clone();
-        let set_current_button = if is_selected {
-            None
-        } else {
-            Some(Self::typed_button(
-                "set current",
-                MonolithCockpitAction::SetTenantContext {
-                    tenant_name: tenant.name.clone(),
-                },
-                Self::next_mouse_state(mouse_states, button_index),
-                app,
-            ))
-        };
-
         let header = Hoverable::new(tenant_mouse_state, |_| {
             Container::new(
                 Flex::row()
@@ -1344,7 +1354,7 @@ VMs and runtimes:\n{}",
                     )
                     .finish(),
             )
-            .with_padding(Padding::uniform(2.))
+            .with_padding(Padding::uniform(1.))
             .finish()
         })
         .with_cursor(Cursor::PointingHand)
@@ -1357,14 +1367,13 @@ VMs and runtimes:\n{}",
 
         let mut content = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(7.)
+            .with_spacing(6.)
             .with_child(header);
 
         if is_expanded {
             content.add_child(Self::muted_text(
                 format!(
-                    "{} · {} vms · {} / {} runtimes visible",
-                    tenant.environment,
+                    "{} vms · {} / {} runtimes visible",
                     tenant.hosts.len(),
                     Self::visible_runtime_count(tenant, filter),
                     Self::runtime_count(tenant)
@@ -1372,19 +1381,11 @@ VMs and runtimes:\n{}",
                 12.,
                 app,
             ));
-            if let Some(set_current_button) = set_current_button {
-                content.add_child(
-                    Flex::row()
-                        .with_spacing(6.)
-                        .with_child(set_current_button)
-                        .finish(),
-                );
-            }
             content.add_child(hosts.finish());
         }
 
         let mut container = Container::new(content.finish())
-            .with_padding(Padding::uniform(8.).with_left(10.).with_right(10.))
+            .with_padding(Padding::uniform(8.))
             .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
 
@@ -1450,10 +1451,6 @@ impl TypedActionView for MonolithCockpitView {
                     .write(ClipboardContent::plain_text(context.clone()));
                 ctx.notify();
             }
-            MonolithCockpitAction::SetTenantContext { tenant_name } => {
-                self.selected_tenant = Some(tenant_name.clone());
-                ctx.notify();
-            }
             MonolithCockpitAction::ClearSelectedTenant => {
                 self.selected_tenant = None;
                 ctx.notify();
@@ -1491,6 +1488,7 @@ impl TypedActionView for MonolithCockpitView {
                 ctx.notify();
             }
             MonolithCockpitAction::ToggleTenant { tenant_name } => {
+                self.selected_tenant = Some(tenant_name.clone());
                 if !self.expanded_tenants.insert(tenant_name.clone()) {
                     self.expanded_tenants.remove(tenant_name);
                 }
