@@ -58,6 +58,13 @@ struct CockpitProfile {
     tenants: Vec<TenantProfile>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedRuntimeScope {
+    tenant_name: String,
+    host_name: String,
+    runtime_name: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum MonolithCockpitAction {
     OpenCommand {
@@ -77,6 +84,16 @@ pub enum MonolithCockpitAction {
         tenant_name: String,
         context: String,
     },
+    CopyRuntimeContext {
+        scope: SelectedRuntimeScope,
+        context: String,
+    },
+    SelectRuntime {
+        tenant_name: String,
+        host_name: String,
+        runtime_name: String,
+    },
+    ClearSelectedRuntime,
     ClearSelectedTenant,
     ShowTenantFilter {
         filter: TenantFilter,
@@ -115,6 +132,7 @@ pub struct MonolithCockpitView {
     expanded_tenants: HashSet<String>,
     tenant_filter: TenantFilter,
     selected_tenant: Option<String>,
+    selected_runtime: Option<SelectedRuntimeScope>,
 }
 
 impl MonolithCockpitView {
@@ -131,6 +149,7 @@ impl MonolithCockpitView {
             expanded_tenants: HashSet::new(),
             tenant_filter: TenantFilter::WithVms,
             selected_tenant: None,
+            selected_runtime: None,
         }
     }
 
@@ -239,6 +258,100 @@ Work only in the runtime workdir unless I explicitly widen scope. First inspect 
             Self::gcloud_ssh_prefix(host),
             Self::remote_runtime_cd_command(&runtime.workdir)
         )
+    }
+
+    fn runtime_diagnosis_prompt(
+        tenant: &TenantProfile,
+        host: &HostProfile,
+        runtime: &RuntimeProfile,
+        service_name: &str,
+    ) -> String {
+        format!(
+            "/agent Diagnose this Monolith runtime incident from inside Warp.\n\
+Tenant: {}\n\
+Tenant status: {}\n\
+VM: {}\n\
+Zone: {}\n\
+Project: {}\n\
+Runtime: {}\n\
+Runtime status: {}\n\
+Workdir: {}\n\
+Git ref: {}\n\
+Service: {}\n\n\
+Open or use the SSH workbench:\n{}\n\
+Then move to the runtime directory:\n{}\n\n\
+Run a read-only diagnosis first: pwd, git status --short --branch, systemctl --user status {}, recent journal logs, process list, disk space, and relevant env/config checks. Summarize the likely cause and propose the safest next command. Do not start, restart, deploy, edit files, or mutate production without explicit confirmation.",
+            tenant.name,
+            tenant.environment,
+            host.name,
+            host.zone,
+            host.project.as_deref().unwrap_or(GCP_PROJECT),
+            runtime.name,
+            runtime.status,
+            runtime.workdir,
+            runtime.git_ref,
+            service_name,
+            Self::gcloud_ssh_prefix(host),
+            Self::remote_runtime_cd_command(&runtime.workdir),
+            service_name,
+        )
+    }
+
+    fn runtime_context(
+        tenant: &TenantProfile,
+        host: &HostProfile,
+        runtime: &RuntimeProfile,
+        active_environment: &str,
+        api_url: &str,
+    ) -> String {
+        format!(
+            "Tenant: {}\n\
+Tenant environment/status: {}\n\
+Active cockpit environment: {}\n\
+Fleet API: {}\n\
+GCP project: {}\n\
+VM: {}\n\
+Zone: {}\n\
+VM status: {}\n\
+Runtime: {}\n\
+Runtime status: {}\n\
+Workdir: {}\n\
+Git ref: {}\n\
+Service: {}",
+            tenant.name,
+            tenant.environment,
+            active_environment,
+            api_url,
+            host.project.as_deref().unwrap_or(GCP_PROJECT),
+            host.name,
+            host.zone,
+            host.status,
+            runtime.name,
+            runtime.status,
+            runtime.workdir,
+            runtime.git_ref,
+            Self::runtime_service_name(runtime),
+        )
+    }
+
+    fn selected_runtime_profiles<'a>(
+        profile: &'a CockpitProfile,
+        scope: &SelectedRuntimeScope,
+    ) -> Option<(&'a TenantProfile, &'a HostProfile, &'a RuntimeProfile)> {
+        let tenant = profile
+            .tenants
+            .iter()
+            .find(|tenant| tenant.name == scope.tenant_name)?;
+        let host = tenant
+            .hosts
+            .iter()
+            .find(|host| host.name == scope.host_name)?;
+        let runtime = host
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.name == scope.runtime_name)?;
+
+        Some((tenant, host, runtime))
     }
 
     fn tenant_status_label(tenant: &TenantProfile) -> &'static str {
@@ -806,6 +919,250 @@ VMs and runtimes:\n{}",
             .finish()
     }
 
+    fn render_selected_runtime_workbench(
+        &self,
+        profile: &CockpitProfile,
+        scope: &SelectedRuntimeScope,
+        active_environment: &str,
+        api_url: &str,
+        mouse_states: &[MouseStateHandle],
+        button_index: &mut usize,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        let (tenant, host, runtime) = Self::selected_runtime_profiles(profile, scope)?;
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let service_name = Self::runtime_service_name(runtime);
+        let runtime_context =
+            Self::runtime_context(tenant, host, runtime, active_environment, api_url);
+        let diagnosis_prompt = Self::runtime_diagnosis_prompt(tenant, host, runtime, &service_name);
+        let ssh_command = Self::gcloud_ssh_prefix(host);
+        let cd_command = Self::remote_runtime_cd_command(&runtime.workdir);
+        let files_command = Self::remote_file_browse_command(host, &runtime.workdir);
+        let git_command = Self::remote_command(
+            host,
+            &format!(
+                "cd {} && git status --short --branch",
+                Self::shell_escape(&runtime.workdir)
+            ),
+        );
+        let logs_command = Self::remote_command(
+            host,
+            &format!(
+                "cd {} && (test -d logs && tail -n 200 -f logs/*.log || journalctl --user -u {} -f)",
+                Self::shell_escape(&runtime.workdir),
+                Self::shell_escape(&service_name),
+            ),
+        );
+        let service_status = Self::remote_command(
+            host,
+            &format!(
+                "cd {} && printf 'runtime: {}\\nservice: {}\\n\\n' && systemctl --user status {} --no-pager || true && printf '\\nrecent logs\\n' && journalctl --user -u {} -n 80 --no-pager || true",
+                Self::shell_escape(&runtime.workdir),
+                Self::shell_escape(&runtime.name),
+                Self::shell_escape(&service_name),
+                Self::shell_escape(&service_name),
+                Self::shell_escape(&service_name),
+            ),
+        );
+        let prod_locked = tenant.environment.contains("prod");
+        let inactive_target = tenant.environment.contains("offboarded")
+            || host.status.contains("terminated")
+            || host.status.contains("unknown");
+        let guard_command = |action: &str, reason: &str| {
+            format!(
+                "printf '%s\\n' {}",
+                Self::shell_escape(&format!(
+                    "Monolith cockpit blocked {action} for {}/{}/{}: {reason}",
+                    tenant.name, host.name, runtime.name
+                ))
+            )
+        };
+        let guarded_service_command = |action: &str, command: String| {
+            if prod_locked {
+                guard_command(action, "prod writes require explicit elevated workflow")
+            } else if inactive_target {
+                guard_command(action, "target is offboarded, terminated, or unknown")
+            } else {
+                command
+            }
+        };
+        let start_command = guarded_service_command(
+            "start",
+            Self::remote_command(
+                host,
+                &format!(
+                    "systemctl --user start {}",
+                    Self::shell_escape(&service_name)
+                ),
+            ),
+        );
+        let pause_command = guarded_service_command(
+            "pause",
+            Self::remote_command(
+                host,
+                &format!(
+                    "systemctl --user stop {}",
+                    Self::shell_escape(&service_name)
+                ),
+            ),
+        );
+        let restart_command = guarded_service_command(
+            "restart",
+            Self::remote_command(
+                host,
+                &format!(
+                    "systemctl --user restart {}",
+                    Self::shell_escape(&service_name)
+                ),
+            ),
+        );
+
+        Some(
+            Container::new(
+                Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_spacing(10.)
+                    .with_child(
+                        Flex::column()
+                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                            .with_spacing(5.)
+                            .with_child(Self::section_label("RUNTIME WORKBENCH", app))
+                            .with_child(
+                                Text::new(runtime.name.clone(), appearance.ui_font_family(), 14.)
+                                    .with_color(theme.active_ui_text_color().into_solid())
+                                    .with_style(Properties::default().weight(Weight::Semibold))
+                                    .finish(),
+                            )
+                            .with_child(Self::muted_text(
+                                format!("{} / {} / {}", tenant.name, host.name, runtime.workdir),
+                                11.,
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::status_chip(
+                                &format!("status {}", runtime.status),
+                                app,
+                            ))
+                            .with_child(Self::status_chip(
+                                &format!("service {}", service_name),
+                                app,
+                            ))
+                            .with_child(Self::status_chip(&format!("zone {}", host.zone), app))
+                            .finish(),
+                    )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::primary_typed_button(
+                                "diagnose",
+                                MonolithCockpitAction::StartTenantChat {
+                                    tenant_name: tenant.name.clone(),
+                                    prompt: diagnosis_prompt,
+                                },
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::ssh_workbench_button(
+                                "ssh",
+                                ssh_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::terminal_command_button(
+                                "cd",
+                                cd_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::action_button(
+                                "status",
+                                service_status,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::action_button(
+                                "logs",
+                                logs_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::action_button(
+                                "git",
+                                git_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::action_button(
+                                "files",
+                                files_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::action_button(
+                                "start",
+                                start_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::action_button(
+                                "pause",
+                                pause_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::action_button(
+                                "restart",
+                                restart_command,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::typed_button(
+                                "copy context",
+                                MonolithCockpitAction::CopyRuntimeContext {
+                                    scope: scope.clone(),
+                                    context: runtime_context,
+                                },
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "exit runtime",
+                                MonolithCockpitAction::ClearSelectedRuntime,
+                                Self::next_mouse_state(mouse_states, button_index),
+                                app,
+                            ))
+                            .finish(),
+                    )
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(10.))
+            .with_background(theme.surface_1())
+            .with_border(Border::all(1.).with_border_fill(theme.surface_3()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish(),
+        )
+    }
+
     fn render_selected_tenant_workbench(
         &self,
         profile: &CockpitProfile,
@@ -1152,6 +1509,16 @@ VMs and runtimes:\n{}",
                             Self::next_mouse_state(mouse_states, button_index),
                             app,
                         ))
+                        .with_child(Self::typed_button(
+                            "focus",
+                            MonolithCockpitAction::SelectRuntime {
+                                tenant_name: tenant.name.clone(),
+                                host_name: host.name.clone(),
+                                runtime_name: runtime.name.clone(),
+                            },
+                            Self::next_mouse_state(mouse_states, button_index),
+                            app,
+                        ))
                         .with_child(Self::terminal_command_button(
                             "cd",
                             runtime_cd,
@@ -1464,8 +1831,34 @@ impl TypedActionView for MonolithCockpitView {
                     .write(ClipboardContent::plain_text(context.clone()));
                 ctx.notify();
             }
+            MonolithCockpitAction::CopyRuntimeContext { scope, context } => {
+                self.selected_tenant = Some(scope.tenant_name.clone());
+                self.selected_runtime = Some(scope.clone());
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(context.clone()));
+                ctx.notify();
+            }
+            MonolithCockpitAction::SelectRuntime {
+                tenant_name,
+                host_name,
+                runtime_name,
+            } => {
+                self.selected_tenant = Some(tenant_name.clone());
+                self.selected_runtime = Some(SelectedRuntimeScope {
+                    tenant_name: tenant_name.clone(),
+                    host_name: host_name.clone(),
+                    runtime_name: runtime_name.clone(),
+                });
+                self.expanded_tenants.insert(tenant_name.clone());
+                ctx.notify();
+            }
             MonolithCockpitAction::ClearSelectedTenant => {
                 self.selected_tenant = None;
+                self.selected_runtime = None;
+                ctx.notify();
+            }
+            MonolithCockpitAction::ClearSelectedRuntime => {
+                self.selected_runtime = None;
                 ctx.notify();
             }
             MonolithCockpitAction::ShowTenantFilter { filter } => {
@@ -1502,6 +1895,7 @@ impl TypedActionView for MonolithCockpitView {
             }
             MonolithCockpitAction::ToggleTenant { tenant_name } => {
                 self.selected_tenant = Some(tenant_name.clone());
+                self.selected_runtime = None;
                 if !self.expanded_tenants.insert(tenant_name.clone()) {
                     self.expanded_tenants.remove(tenant_name);
                 }
@@ -1509,6 +1903,7 @@ impl TypedActionView for MonolithCockpitView {
             }
             MonolithCockpitAction::SwitchEnvironment { environment } => {
                 self.selected_tenant = None;
+                self.selected_runtime = None;
                 self.expanded_tenants.clear();
                 MonolithSettings::handle(ctx).update(ctx, |settings, ctx| {
                     let (api_url, profile_path) = if environment == "prod" {
@@ -1582,6 +1977,20 @@ impl View for MonolithCockpitView {
             .with_child(self.render_environment_switcher(app))
             .with_child(self.render_cloud_toolbar(app))
             .with_child(self.render_cockpit_summary(&profile, app));
+
+        if let Some(scope) = self.selected_runtime.as_ref() {
+            if let Some(selected_runtime_workbench) = self.render_selected_runtime_workbench(
+                &profile,
+                scope,
+                &active_environment,
+                &api_url,
+                &self.button_mouse_states,
+                &mut button_index,
+                app,
+            ) {
+                body.add_child(selected_runtime_workbench);
+            }
+        }
 
         if let Some(selected_workbench) = self.render_selected_tenant_workbench(
             &profile,
