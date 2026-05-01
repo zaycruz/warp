@@ -806,11 +806,14 @@ VMs and runtimes:\n{}",
             .finish()
     }
 
-    fn render_selected_tenant_context(
+    fn render_selected_tenant_workbench(
         &self,
         profile: &CockpitProfile,
         active_environment: &str,
         api_url: &str,
+        filter: TenantFilter,
+        mouse_states: &[MouseStateHandle],
+        button_index: &mut usize,
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
         let tenant_name = self.selected_tenant.as_ref()?;
@@ -822,26 +825,40 @@ VMs and runtimes:\n{}",
         let theme = appearance.theme();
         let context = Self::tenant_context(tenant, active_environment, api_url);
         let prompt = Self::tenant_chat_prompt(tenant, active_environment, api_url);
+        let visible_hosts = tenant
+            .hosts
+            .iter()
+            .filter(|host| Self::host_matches_filter(host, filter))
+            .collect::<Vec<_>>();
+
+        let mut host_list = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(8.);
+        for host in &visible_hosts {
+            host_list.add_child(Self::host_card(
+                host,
+                tenant,
+                filter,
+                mouse_states,
+                button_index,
+                app,
+            ));
+        }
 
         Some(
             Container::new(
                 Flex::column()
                     .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_spacing(8.)
+                    .with_spacing(10.)
                     .with_child(
                         Flex::column()
                             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                             .with_spacing(6.)
-                            .with_child(Self::section_label("CURRENT TENANT", app))
-                            .with_child(
-                                Text::new(tenant.name.clone(), appearance.ui_font_family(), 13.)
-                                    .with_color(theme.active_ui_text_color().into_solid())
-                                    .with_style(Properties::default().weight(Weight::Semibold))
-                                    .finish(),
-                            )
+                            .with_child(Self::section_label("TENANT WORKBENCH", app))
                             .with_child(Self::muted_text(
                                 format!(
-                                    "{} · {} vms · {} / {} runtimes running",
+                                    "{} / {} · {} vms · runtimes {} / {} running",
+                                    tenant.name,
                                     tenant.environment,
                                     tenant.hosts.len(),
                                     Self::running_runtime_count(tenant),
@@ -853,40 +870,34 @@ VMs and runtimes:\n{}",
                             .finish(),
                     )
                     .with_child(
-                        Flex::column()
-                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                        Flex::row()
                             .with_spacing(6.)
-                            .with_child(
-                                Flex::row()
-                                    .with_spacing(6.)
-                                    .with_child(Self::primary_typed_button(
-                                        "manage in chat",
-                                        MonolithCockpitAction::StartTenantChat {
-                                            tenant_name: tenant.name.clone(),
-                                            prompt,
-                                        },
-                                        self.tenant_context_mouse_states
-                                            .first()
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        app,
-                                    ))
-                                    .with_child(Self::typed_button(
-                                        "copy context",
-                                        MonolithCockpitAction::CopyTenantContext {
-                                            tenant_name: tenant.name.clone(),
-                                            context,
-                                        },
-                                        self.tenant_context_mouse_states
-                                            .get(1)
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        app,
-                                    ))
-                                    .finish(),
-                            )
+                            .with_child(Self::primary_typed_button(
+                                "chat",
+                                MonolithCockpitAction::StartTenantChat {
+                                    tenant_name: tenant.name.clone(),
+                                    prompt,
+                                },
+                                self.tenant_context_mouse_states
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                app,
+                            ))
                             .with_child(Self::typed_button(
-                                "exit tenant",
+                                "copy",
+                                MonolithCockpitAction::CopyTenantContext {
+                                    tenant_name: tenant.name.clone(),
+                                    context,
+                                },
+                                self.tenant_context_mouse_states
+                                    .get(1)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                app,
+                            ))
+                            .with_child(Self::typed_button(
+                                "exit",
                                 MonolithCockpitAction::ClearSelectedTenant,
                                 self.tenant_context_mouse_states
                                     .get(2)
@@ -896,6 +907,28 @@ VMs and runtimes:\n{}",
                             ))
                             .finish(),
                     )
+                    .with_child(
+                        Flex::row()
+                            .with_spacing(6.)
+                            .with_child(Self::status_chip(
+                                &format!("visible vms {}", visible_hosts.len()),
+                                app,
+                            ))
+                            .with_child(Self::status_chip(
+                                &format!(
+                                    "visible runtimes {}",
+                                    Self::visible_runtime_count(tenant, filter)
+                                ),
+                                app,
+                            ))
+                            .with_child(Self::status_chip(Self::tenant_filter_label(filter), app))
+                            .finish(),
+                    )
+                    .with_child(if visible_hosts.is_empty() {
+                        Self::muted_text("No VMs match the current fleet filter.", 12., app)
+                    } else {
+                        host_list.finish()
+                    })
                     .finish(),
             )
             .with_padding(Padding::uniform(10.))
@@ -1287,32 +1320,12 @@ VMs and runtimes:\n{}",
         tenant: &TenantProfile,
         is_expanded: bool,
         tenant_mouse_state: MouseStateHandle,
-        mouse_states: &[MouseStateHandle],
-        button_index: &mut usize,
         filter: TenantFilter,
         is_selected: bool,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-
-        let mut hosts = Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(6.);
-        for host in tenant
-            .hosts
-            .iter()
-            .filter(|host| Self::host_matches_filter(host, filter))
-        {
-            hosts.add_child(Self::host_card(
-                host,
-                tenant,
-                filter,
-                mouse_states,
-                button_index,
-                app,
-            ));
-        }
 
         let chevron_icon = if is_expanded {
             Icon::ChevronDown
@@ -1373,7 +1386,8 @@ VMs and runtimes:\n{}",
         if is_expanded {
             content.add_child(Self::muted_text(
                 format!(
-                    "{} vms · {} / {} runtimes visible",
+                    "{} · {} vms · {} / {} runtimes visible",
+                    tenant.environment,
                     tenant.hosts.len(),
                     Self::visible_runtime_count(tenant, filter),
                     Self::runtime_count(tenant)
@@ -1381,7 +1395,6 @@ VMs and runtimes:\n{}",
                 12.,
                 app,
             ));
-            content.add_child(hosts.finish());
         }
 
         let mut container = Container::new(content.finish())
@@ -1548,8 +1561,6 @@ impl View for MonolithCockpitView {
                 tenant,
                 self.tenant_is_expanded(tenant),
                 tenant_mouse_state,
-                &self.button_mouse_states,
-                &mut button_index,
                 self.tenant_filter,
                 self.selected_tenant
                     .as_ref()
@@ -1572,10 +1583,16 @@ impl View for MonolithCockpitView {
             .with_child(self.render_cloud_toolbar(app))
             .with_child(self.render_cockpit_summary(&profile, app));
 
-        if let Some(selected_context) =
-            self.render_selected_tenant_context(&profile, &active_environment, &api_url, app)
-        {
-            body.add_child(selected_context);
+        if let Some(selected_workbench) = self.render_selected_tenant_workbench(
+            &profile,
+            &active_environment,
+            &api_url,
+            self.tenant_filter,
+            &self.button_mouse_states,
+            &mut button_index,
+            app,
+        ) {
+            body.add_child(selected_workbench);
         }
 
         if let Some(status) = profile_status {
@@ -1586,7 +1603,7 @@ impl View for MonolithCockpitView {
             );
         }
 
-        body.add_child(Self::section_label("FLEET CONTROLS", app));
+        body.add_child(Self::section_label("FLEET TREE", app));
         let tenant_names = filtered_tenants
             .iter()
             .map(|tenant| tenant.name.clone())
